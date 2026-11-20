@@ -1,0 +1,348 @@
+name: SkillSwap AI CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - development
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Cancel in-progress workflow runs for PRs and non-main branches to save CI minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # ============================================================================
+  # JOB 1: FRONTEND CONTINUOUS INTEGRATION (Bun, TypeScript, Vitest, Vite)
+  # ============================================================================
+  frontend-ci:
+    name: Frontend CI — TypeCheck, Tests & Vite Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies using bun.lock
+        run: bun install --frozen-lockfile
+
+      - name: Run TypeScript type checking
+        run: bun run lint
+
+      - name: Run ESLint (if configured)
+        run: |
+          if [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.cjs" ] || [ -f "eslint.config.ts" ] || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] || [ -f ".eslintrc.yml" ]; then
+            echo "ESLint configuration found. Running ESLint..."
+            bunx eslint .
+          else
+            echo "ESLint is not configured in this repository (package.json 'lint' script runs 'tsc --noEmit')."
+          fi
+
+      - name: Run all feature-based frontend tests
+        run: |
+          mkdir -p reports
+          bun run test --reporter=default --reporter=json --outputFile.json=reports/vitest-report.json --reporter=junit --outputFile.junit=reports/vitest-junit.xml
+
+      - name: Generate Frontend Test Execution Report
+        if: always()
+        run: |
+          bun -e '
+            const fs = require("fs");
+            const path = require("path");
+            const reportPath = "reports/vitest-report.json";
+            if (!fs.existsSync(reportPath)) {
+              console.log("No Vitest JSON report found.");
+              process.exit(0);
+            }
+            const data = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+            const total = data.numTotalTests ?? 0;
+            const passed = data.numPassedTests ?? 0;
+            const failed = data.numFailedTests ?? 0;
+            const skipped = (data.numPendingTests ?? 0) + (data.numTodoTests ?? 0);
+
+            const byFeature = {};
+            for (const suite of data.testResults || []) {
+              const rel = suite.name.replace(/\\/g, "/");
+              const match = rel.match(/\/tests\/([^/]+)\//);
+              const feature = match ? match[1] : "root";
+              if (!byFeature[feature]) {
+                byFeature[feature] = { total: 0, passed: 0, failed: 0, skipped: 0 };
+              }
+              for (const t of suite.assertionResults || []) {
+                byFeature[feature].total += 1;
+                if (t.status === "passed") byFeature[feature].passed += 1;
+                else if (t.status === "failed") byFeature[feature].failed += 1;
+                else byFeature[feature].skipped += 1;
+              }
+            }
+
+            const lines = [
+              "## Frontend Test Execution Report (Vitest)",
+              "",
+              "| Metric | Count |",
+              "| :--- | :---: |",
+              `| Total Tests | **${total}** |`,
+              `| Passed Tests | ${passed} |`,
+              `| Failed Tests | ${failed} |`,
+              `| Skipped Tests | ${skipped} |`,
+              "",
+              "### Results by Feature Folder (`tests/`)",
+              "",
+              "| Feature | Total | Passed | Failed | Skipped |",
+              "| :--- | :---: | :---: | :---: | :---: |"
+            ];
+
+            for (const feature of Object.keys(byFeature).sort()) {
+              const s = byFeature[feature];
+              lines.push(`| \`${feature}\` | ${s.total} | ${s.passed} | ${s.failed} | ${s.skipped} |`);
+            }
+
+            const summary = lines.join("\n") + "\n";
+            console.log(summary);
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+            }
+          '
+
+      - name: Upload frontend test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Build production bundle with Vite
+        run: bun run build
+
+      - name: Upload Vite production build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vite-production-build
+          path: dist/
+          retention-days: 14
+
+  # ============================================================================
+  # JOB 2: BACKEND CONTINUOUS INTEGRATION (Python FastAPI / Pytest)
+  # ============================================================================
+  backend-ci:
+    name: Backend CI — Python Pytest Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for backend tests
+        id: check_backend
+        run: |
+          if [ -d "backend/tests" ] && [ -n "$(find backend/tests -maxdepth 2 -name 'test_*.py' -print -quit)" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python 3.11
+        if: steps.check_backend.outputs.exists == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements.txt'
+
+      - name: Install backend dependencies
+        if: steps.check_backend.outputs.exists == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run backend Pytest suite
+        if: steps.check_backend.outputs.exists == 'true'
+        env:
+          PYTHONPATH: .
+        run: |
+          mkdir -p reports
+          pytest backend/tests -v --junitxml=reports/backend-junit.xml -o junit_family=xunit2
+
+      - name: Generate Backend Test Execution Report
+        if: always() && steps.check_backend.outputs.exists == 'true'
+        run: |
+          python -c '
+          import os, xml.etree.ElementTree as ET
+          path = "reports/backend-junit.xml"
+          if not os.path.exists(path):
+              print("No backend JUnit report found.")
+              raise SystemExit(0)
+          tree = ET.parse(path)
+          root = tree.getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          total = sum(int(s.attrib.get("tests", 0)) for s in suites)
+          failures = sum(int(s.attrib.get("failures", 0)) for s in suites)
+          errors = sum(int(s.attrib.get("errors", 0)) for s in suites)
+          skipped = sum(int(s.attrib.get("skipped", 0)) for s in suites)
+          failed = failures + errors
+          passed = total - failed - skipped
+          summary = "\n".join([
+              "## Backend Test Execution Report (Pytest)",
+              "",
+              "| Metric | Count |",
+              "| :--- | :---: |",
+              f"| Total Tests | **{total}** |",
+              f"| Passed Tests | {passed} |",
+              f"| Failed Tests | {failed} |",
+              f"| Skipped Tests | {skipped} |",
+              ""
+          ])
+          print(summary)
+          gh_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if gh_summary:
+              with open(gh_summary, "a", encoding="utf-8") as f:
+                  f.write(summary)
+          '
+
+      - name: Upload backend test reports
+        if: always() && steps.check_backend.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ============================================================================
+  # JOB 3: CONTINUOUS DEPLOYMENT — VERCEL PREVIEW (Pull Requests -> main)
+  # ============================================================================
+  deploy-preview:
+    name: CD — Deploy Preview to Vercel
+    needs: [frontend-ci, backend-ci]
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: preview
+      url: ${{ steps.vercel_deploy.outputs.url }}
+
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Vercel deployment secrets
+        run: |
+          if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_ORG_ID" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
+            echo "::error::Missing Vercel deployment secrets. Please configure VERCEL_TOKEN, VERCEL_ORG_ID, and VERCEL_PROJECT_ID in GitHub Repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Install Vercel CLI
+        run: |
+          bun add -g vercel@latest
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Pull Vercel preview environment
+        run: vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+
+      - name: Build project artifacts for Vercel preview
+        run: vercel build --token="$VERCEL_TOKEN"
+
+      - name: Deploy preview to Vercel
+        id: vercel_deploy
+        run: |
+          DEPLOY_OUTPUT=$(vercel deploy --prebuilt --token="$VERCEL_TOKEN")
+          PREVIEW_URL=$(printf '%s\n' "$DEPLOY_OUTPUT" | tail -n 1 | tr -d '[:space:]')
+          echo "url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Vercel Preview Deployment"
+            echo ""
+            echo "Preview URL: $PREVIEW_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # JOB 4: CONTINUOUS DEPLOYMENT — VERCEL PRODUCTION (Push / Merge -> main)
+  # ============================================================================
+  deploy-production:
+    name: CD — Deploy Production to Vercel
+    needs: [frontend-ci, backend-ci]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: ${{ steps.vercel_deploy.outputs.url }}
+
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Vercel deployment secrets
+        run: |
+          if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_ORG_ID" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
+            echo "::error::Missing Vercel deployment secrets. Please configure VERCEL_TOKEN, VERCEL_ORG_ID, and VERCEL_PROJECT_ID in GitHub Repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Install Vercel CLI
+        run: |
+          bun add -g vercel@latest
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Pull Vercel production environment
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build project artifacts for Vercel production
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy production to Vercel
+        id: vercel_deploy
+        run: |
+          DEPLOY_OUTPUT=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          PROD_URL=$(printf '%s\n' "$DEPLOY_OUTPUT" | tail -n 1 | tr -d '[:space:]')
+          echo "url=$PROD_URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Vercel Production Deployment"
+            echo ""
+            echo "Production URL: $PROD_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
