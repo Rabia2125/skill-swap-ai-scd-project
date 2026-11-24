@@ -346,3 +346,4 @@ jobs:
             echo ""
             echo "Production URL: $PROD_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+#done in main file
