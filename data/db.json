@@ -450,6 +450,48 @@
         "exchangesCompleted": 5
       },
       "passwordHash": "$2b$10$WvYJTpcYxp2CfskYgRLtUuJIJiv2tCssAlj48t3Qi3PEqYY3SGuva"
+    },
+    {
+      "id": "user_1795533133702",
+      "name": "Rabia Khalid",
+      "email": "rabiakhalid476@gmail.com",
+      "location": "lahore",
+      "createdAt": "2026-11-24T15:12:13.886Z",
+      "passwordHash": "$2b$10$ROlpXFqs6Yo4r4BYb4PNqeYILBRwrjxEkdMukuajpM8IM8cpsJjzm",
+      "profile": {
+        "id": "prof_user_1795533133702",
+        "name": "Rabia Khalid",
+        "email": "rabiakhalid476@gmail.com",
+        "avatar": "/src/assets/images/avatar_mentor_female_1794059251546.jpg",
+        "location": "lahore",
+        "title": "Member & Skill Explorer",
+        "bio": "Hello! I recently joined SkillSwap AI to exchange practical skills and grow my technical capabilities.",
+        "skillsToTeach": [
+          {
+            "id": "sk_1795533133889",
+            "name": "Web Development Basics",
+            "category": "Web Development",
+            "level": "Beginner",
+            "experienceYears": 1,
+            "description": "HTML5, CSS, and basic JavaScript"
+          }
+        ],
+        "skillsToLearn": [
+          "UI/UX Designing",
+          "Python"
+        ],
+        "experience": "Looking for hands-on peer collaboration",
+        "education": "Self-directed learner",
+        "interests": [
+          "Software Development",
+          "Lifelong Learning"
+        ],
+        "availability": "Flexible weekday evenings",
+        "learningGoals": "Master modern full-stack development and build real-world applications.",
+        "joinedDate": "Just now",
+        "rating": 5,
+        "exchangesCompleted": 0
+      }
     }
   ],
   "swapRequests": [
